@@ -1,22 +1,20 @@
 package stu.cn.ua.clock.fragments
 
 import android.annotation.SuppressLint
-import android.content.ComponentName
-import android.content.Context
-import android.content.ServiceConnection
 import android.os.Bundle
-import android.os.IBinder
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.ListView
 import android.widget.TextView
 import stu.cn.ua.clock.R
-import stu.cn.ua.clock.services.TimerService
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
- * TimerFragment handles the timer UI and provides user interactions for starting, pausing, stopping,
- * and recording lap times. It communicates with TimerService to handle the background operations.
+ * TimerFragment handles the timer functionality. It provides start, pause, lap, and stop features.
+ * Time counting is managed using ScheduledExecutorService.
  */
 class TimerFragment : BaseFragment(R.layout.fragment_timer) {
 
@@ -30,62 +28,22 @@ class TimerFragment : BaseFragment(R.layout.fragment_timer) {
 
     private val lapTimes = mutableListOf<String>()
 
-    // Service and timer states
-    private var timerService: TimerService? = null
+    // Timer-related variables
+    private var scheduler: ScheduledExecutorService? = null
+    private var elapsedTime: Long = 0L
+    private var lastLapTime: Long = 0L
     private var isTimerRunning = false
     private var isTimerPaused = false
-
-    // Connection to TimerService
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as TimerService.TimerBinder
-            timerService = binder.getService()
-            setupTimerServiceListener()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            timerService = null
-        }
-    }
+    private var lapCount = 0
 
     /**
-     * Sets up the listener for TimerService to update the UI based on timer events.
-     */
-    private fun setupTimerServiceListener() {
-        timerService?.setTimerListener(object : TimerService.TimerServiceListener {
-            override fun onTimerUpdated(time: String) {
-                textTimer.text = time
-            }
-
-            override fun onLapRecorded(lapTime: String, lapCount: Int) {
-                lapTimes.add("Lap $lapCount - $lapTime")
-                (listLaps.adapter as ArrayAdapter<*>).notifyDataSetChanged()
-            }
-
-            override fun onTimerStopped() {
-                resetTimerState()
-            }
-        })
-    }
-
-    /**
-     * Initializes the UI components, sets up listeners, and binds to TimerService.
+     * Initializes the UI components and sets up button listeners.
      */
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        setScreenTitle(R.string.timer_screen_title)
 
-        bindTimerService()
         initializeUI(view)
         setupButtonListeners()
-    }
-
-    /**
-     * Binds the fragment to TimerService.
-     */
-    private fun bindTimerService() {
-        val intent = TimerService.getIntent(requireContext())
-        requireActivity().bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
     /**
@@ -116,9 +74,19 @@ class TimerFragment : BaseFragment(R.layout.fragment_timer) {
      * Starts the timer and updates the UI states.
      */
     private fun startTimer() {
-        timerService?.startTimer()
+        if (isTimerRunning) return
+
         isTimerRunning = true
         isTimerPaused = false
+
+        scheduler = Executors.newScheduledThreadPool(1)
+        scheduler?.scheduleAtFixedRate({
+            if (!isTimerPaused) {
+                elapsedTime += 10
+                updateTimerUI(elapsedTime)
+            }
+        }, 0, 10, TimeUnit.MILLISECONDS)
+
         updateButtonStates()
     }
 
@@ -126,21 +94,16 @@ class TimerFragment : BaseFragment(R.layout.fragment_timer) {
      * Toggles between pausing and resuming the timer, updating UI states accordingly.
      */
     private fun togglePauseResumeTimer() {
-        isTimerPaused = if (isTimerPaused) {
-            timerService?.continueTimer()
-            false
-        } else {
-            timerService?.pauseTimer()
-            true
-        }
+        isTimerPaused = !isTimerPaused
         updateButtonStates()
     }
 
     /**
-     * Stops the timer and resets UI states.
+     * Stops the timer, shuts down the executor, and resets UI states.
      */
     private fun stopTimer() {
-        timerService?.stopTimer()
+        scheduler?.shutdownNow()
+        scheduler = null
         resetTimerState()
     }
 
@@ -149,9 +112,42 @@ class TimerFragment : BaseFragment(R.layout.fragment_timer) {
      */
     private fun handleLapOrClearAction() {
         if (btnLap.text == "Lap") {
-            timerService?.recordLap()
+            recordLap()
         } else if (btnLap.text == "Clear") {
             clearLaps()
+        }
+    }
+
+    /**
+     * Records a lap time and updates the list view.
+     */
+    private fun recordLap() {
+        lapCount++
+        val lapTime = elapsedTime - lastLapTime
+        lastLapTime = elapsedTime
+        lapTimes.add("Lap $lapCount - ${formatTime(lapTime)}")
+        (listLaps.adapter as ArrayAdapter<*>).notifyDataSetChanged()
+    }
+
+    /**
+     * Clears all lap times and resets the UI.
+     */
+    @SuppressLint("SetTextI18n")
+    private fun clearLaps() {
+        lapTimes.clear()
+        textTimer.text = "00:00:00.000"
+        (listLaps.adapter as ArrayAdapter<*>).notifyDataSetChanged()
+        resetTimerState()
+    }
+
+    /**
+     * Updates the UI to display the current elapsed time.
+     *
+     * @param time Time in milliseconds to display.
+     */
+    private fun updateTimerUI(time: Long) {
+        requireActivity().runOnUiThread {
+            textTimer.text = formatTime(time)
         }
     }
 
@@ -169,22 +165,27 @@ class TimerFragment : BaseFragment(R.layout.fragment_timer) {
     }
 
     /**
-     * Clears all lap times and resets the UI.
-     */
-    @SuppressLint("SetTextI18n")
-    private fun clearLaps() {
-        lapTimes.clear()
-        textTimer.text = "00:00:00"
-        (listLaps.adapter as ArrayAdapter<*>).notifyDataSetChanged()
-        resetTimerState()
-    }
-
-    /**
      * Resets the timer state and updates the UI.
      */
     private fun resetTimerState() {
         isTimerRunning = false
         isTimerPaused = false
+        elapsedTime = 0L
+        lastLapTime = 0L
+        lapCount = 0
         updateButtonStates()
+    }
+
+    /**
+     * Formats the time from milliseconds to HH:mm:ss.SSS.
+     *
+     * @param milliseconds Time in milliseconds.
+     * @return Formatted time string.
+     */
+    private fun formatTime(milliseconds: Long): String {
+        val hundredths = (milliseconds % 1000) / 10 // Вираховуємо соті частки секунди
+        val seconds = (milliseconds / 1000) % 60
+        val minutes = (milliseconds / (1000 * 60)) % 60
+        return String.format("%02d:%02d:%02d", minutes, seconds, hundredths)
     }
 }
